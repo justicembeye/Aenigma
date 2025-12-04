@@ -1,0 +1,14 @@
+[package]
+name = "Aenigma"
+version = "0.1.0"
+edition = "2024"
+authors = ["Lozio <guannymbeye@email.com>"]
+
+[dependencies]
+rand = "0.10.0-rc.0"
+clearscreen = "4.0.2"
+ratatui = "0.29.0"
+crossterm = "0.29.0"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
