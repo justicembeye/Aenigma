@@ -76,7 +76,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
 
 fn draw_setup_ui(f: &mut Frame, app: &mut App, area: Rect) {
     // 1. On crée une zone centrale pour la configuration
-    let config_area = create_centered_rect(area, 60, 50);
+    let config_area = create_centered_rect(area, 60, 80);
 
     // 2. Titre de l'étape en fonction du step
     let (step_title, step_index) = match app.setup_step {
@@ -1176,7 +1176,7 @@ fn draw_turn_result_ui(f: &mut Frame, app: &mut App, area: Rect) {
         .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(paragraph, inner_area);
 }fn draw_theme_selection_ui(f: &mut Frame, app: &mut App, area: Rect) {
-    let config_area = create_centered_rect(area, 60, 50);
+    let config_area = create_centered_rect(area, 60, 80);
     
     let title = format!(" Configuration Joueur {} - Thème ", app.setup_player_index + 1);
 
