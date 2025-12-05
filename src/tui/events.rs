@@ -772,6 +772,11 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                         KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
                             // Retour au menu principal
                             app.current_state = AppState::Welcome;
+                            app.welcome_list_items = vec![
+                                "Créer une partie (Hôte)".to_string(),
+                                "Rejoindre une partie (Client)".to_string(),
+                                "Quitter".to_string(),
+                            ];
                             // On pourrait réinitialiser le jeu ici si nécessaire
                         }
                         _ => {}
@@ -801,7 +806,14 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                             match app.pause_menu_index {
                                 0 => app.current_state = AppState::Playing, // Reprendre
                                 1 => app.current_state = AppState::Rules,   // Aide
-                                2 => app.current_state = AppState::Welcome, // Menu Principal
+                                2 => {
+                                    app.current_state = AppState::Welcome; // Menu Principal
+                                    app.welcome_list_items = vec![
+                                        "Créer une partie (Hôte)".to_string(),
+                                        "Rejoindre une partie (Client)".to_string(),
+                                        "Quitter".to_string(),
+                                    ];
+                                }
                                 3 => app.running = false, // Quitter Jeu
                                 _ => {}
                             }
@@ -1107,8 +1119,8 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                     // Retour
                                     app.current_state = AppState::Welcome;
                                     app.welcome_list_items = vec![
-                                        "Nouvelle Partie".to_string(),
-                                        "Multijoueur (Réseau)".to_string(),
+                                        "Créer une partie (Hôte)".to_string(),
+                                        "Rejoindre une partie (Client)".to_string(),
                                         "Quitter".to_string(),
                                     ];
                                     app.welcome_list_state.select(Some(0));
@@ -1119,8 +1131,8 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                         KeyCode::Esc => {
                             app.current_state = AppState::Welcome;
                              app.welcome_list_items = vec![
-                                "Nouvelle Partie".to_string(),
-                                "Multijoueur (Réseau)".to_string(),
+                                "Créer une partie (Hôte)".to_string(),
+                                "Rejoindre une partie (Client)".to_string(),
                                 "Quitter".to_string(),
                             ];
                             app.welcome_list_state.select(Some(0));

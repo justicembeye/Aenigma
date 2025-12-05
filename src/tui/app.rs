@@ -103,8 +103,8 @@ impl App {
             current_state: AppState::Welcome,
             welcome_list_state: welcome_state,
             welcome_list_items: vec![
-                "Nouvelle Partie".to_string(),
-                "Multijoueur (Réseau)".to_string(),
+                "Créer une partie (Hôte)".to_string(),
+                "Rejoindre une partie (Client)".to_string(),
                 "Quitter".to_string(),
             ],
             setup_list_state: setup_state,
