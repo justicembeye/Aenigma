@@ -1,5 +1,6 @@
 use crate::game::{Difficulty};
 use rand::prelude::IndexedRandom;
+use rand::Rng;
 
 pub struct AI {
     #[allow(dead_code)]
@@ -17,24 +18,33 @@ impl AI {
     }
 
     pub fn guess_letter(&mut self, _target_pattern: &str) -> char {
-        // Fréquence des lettres en français (plus fréquent au moins fréquent)
-        let frequency_order = "ESAITNRULODCPMVQFBGHJXYZWK";
+        let mut rng = rand::rng();
         
-        // On cherche la première lettre de la liste de fréquence qui n'a pas encore été essayée
-        let choice = frequency_order.chars()
-            .find(|c| !self.tried_letters.contains(c));
+        // Stratégie selon la difficulté
+        let use_frequency = match self.difficulty {
+            Difficulty::Easy => rng.random_bool(0.4), // 40% de chance d'utiliser la fréquence (très bête)
+            Difficulty::Normal => rng.random_bool(0.8), // 80% de chance (humain)
+            Difficulty::Hard | Difficulty::Expert => true, // Toujours optimal
+        };
 
-        // Si toutes les lettres fréquentes sont prises (cas rare/fin de partie), on prend au hasard parmi ce qui reste
-        let final_choice = if let Some(c) = choice {
-            c
+        let alphabet: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
+        let available: Vec<char> = alphabet.into_iter()
+            .filter(|c| !self.tried_letters.contains(c))
+            .collect();
+
+        if available.is_empty() {
+            return 'A'; // Should not happen
+        }
+
+        let final_choice = if use_frequency {
+            // Fréquence des lettres en français
+            let frequency_order = "ESAITNRULODCPMVQFBGHJXYZWK";
+            frequency_order.chars()
+                .find(|c| !self.tried_letters.contains(c))
+                .unwrap_or_else(|| *available.choose(&mut rng).unwrap())
         } else {
-             let alphabet: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
-             let available: Vec<char> = alphabet.into_iter()
-                .filter(|c| !self.tried_letters.contains(c))
-                .collect();
-             
-             let mut rng = rand::rng();
-             *available.choose(&mut rng).unwrap_or(&'A')
+            // Choix totalement aléatoire
+            *available.choose(&mut rng).unwrap()
         };
         
         self.tried_letters.push(final_choice);
@@ -43,6 +53,12 @@ impl AI {
     
 
     pub fn decide_action(&mut self, target_pattern: &str) -> AIAction {
+        // Gestion du Brouillard de Guerre : Si on ne connaît pas la longueur, on ne peut que proposer des lettres
+        if target_pattern.contains('?') {
+            let letter = self.guess_letter(target_pattern);
+            return AIAction::ProposeLetter(letter);
+        }
+
         // 1. Analyser le pattern (ex: "I_L_S_ON")
         let pattern_len = target_pattern.len();
         let known_chars: Vec<char> = target_pattern.chars().collect();
@@ -60,32 +76,59 @@ impl AI {
             .collect();
 
         // 3. Prise de décision
-        if candidates.len() == 1 {
-            // Un seul candidat : on vérifie si on a assez d'infos pour ne pas frustrer le joueur
-            let revealed_count = known_chars.iter().filter(|&&c| c != '_').count();
-            let min_revealed = (pattern_len as f32 / 2.0).ceil() as usize; // Au moins la moitié
-            
-            // Si on n'a pas assez de lettres (et que le mot fait plus de 2 lettres), on fait semblant de chercher
-            if revealed_count < min_revealed && pattern_len > 2 {
-                let candidate = &candidates[0];
-                // On cherche une lettre manquante
-                for c in candidate.chars() {
+        if !candidates.is_empty() {
+            let mut should_guess = false;
+            let mut guess_word = candidates[0].clone();
+
+            match self.difficulty {
+                Difficulty::Easy => {
+                    // En Facile, l'IA tente de deviner si elle a quelques candidats, même avec peu de certitude
+                    // Elle a 30% de chance de tenter un guess si < 5 candidats
+                    if candidates.len() < 5 && rand::rng().random_bool(0.3) {
+                        should_guess = true;
+                        // Elle choisit un mot au hasard parmi les candidats (risque d'erreur)
+                        guess_word = candidates.choose(&mut rand::rng()).unwrap().clone();
+                    }
+                }
+                Difficulty::Normal => {
+                    // En Normal, l'IA tente si elle a 1 ou 2 candidats
+                    if candidates.len() <= 2 {
+                        should_guess = true;
+                        guess_word = candidates.choose(&mut rand::rng()).unwrap().clone();
+                    }
+                }
+                Difficulty::Hard | Difficulty::Expert => {
+                    // En Difficile/Expert, l'IA ne tente que si elle est sûre (1 seul candidat)
+                    // ou si le ratio de lettres révélées est très élevé
+                    if candidates.len() == 1 {
+                        let revealed_count = known_chars.iter().filter(|&&c| c != '_').count();
+                        let revealed_ratio = revealed_count as f32 / pattern_len as f32;
+                        if revealed_ratio >= 0.6 { // Seuil de confiance
+                            should_guess = true;
+                            guess_word = candidates[0].clone();
+                        }
+                    }
+                }
+            }
+
+            if should_guess {
+                return AIAction::GuessWord(guess_word);
+            } else if candidates.len() == 1 {
+                 // Si on a un seul candidat mais qu'on n'a pas osé deviner (ex: Hard mais ratio faible),
+                 // on cherche les lettres manquantes de ce candidat unique
+                 let candidate = &candidates[0];
+                 for c in candidate.chars() {
                     if !known_chars.contains(&c) && !self.tried_letters.contains(&c) {
                         self.tried_letters.push(c);
                         return AIAction::ProposeLetter(c);
                     }
                 }
             }
-
-            // Sinon, on devine le mot !
-            return AIAction::GuessWord(candidates[0].clone());
         }
         
-        // Si on a peu de candidats (ex: 2 ou 3), on pourrait tenter de deviner au hasard si on est joueur,
-        // mais pour l'instant on reste prudent : on cherche la meilleure lettre pour discriminer.
-        
-        if !candidates.is_empty() {
-             // On cherche la lettre la plus fréquente parmi les candidats (qui n'est pas encore connue)
+        // Si on a peu de candidats, stratégie avancée pour Hard/Expert
+        if !candidates.is_empty() && (matches!(self.difficulty, Difficulty::Hard | Difficulty::Expert)) {
+             // On cherche la lettre la plus discriminante
              let mut letter_counts = std::collections::HashMap::new();
              for word in &candidates {
                  for c in word.chars() {
@@ -95,14 +138,14 @@ impl AI {
                  }
              }
              
-             // On prend la lettre qui apparaît dans le plus de mots candidats
+             // On prend la lettre qui apparaît dans le plus de mots candidats (pour éliminer le max de possibilités ou trouver)
              if let Some((best_letter, _)) = letter_counts.iter().max_by_key(|&(_, count)| count) {
                  self.tried_letters.push(*best_letter);
                  return AIAction::ProposeLetter(*best_letter);
              }
         }
 
-        // Fallback : on propose une lettre selon la fréquence globale
+        // Fallback : on propose une lettre selon la fréquence globale et la difficulté
         let letter = self.guess_letter(target_pattern);
         AIAction::ProposeLetter(letter)
     }

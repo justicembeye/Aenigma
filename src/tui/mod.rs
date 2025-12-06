@@ -36,6 +36,9 @@ pub async fn run() -> io::Result<()> {
         // Étape B : Gérer les événements
         handle_events(&mut app).await?;
         crate::tui::events::handle_network_events(&mut app).await?;
+        
+        // Animation
+        app.time_frame = app.time_frame.wrapping_add(1);
     }
 
     // 4. Restauration du terminal

@@ -1,48 +1,44 @@
-fn draw_pause_popup(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .title(" PAUSE ")
+
+fn draw_theme_selection_method_ui(f: &mut Frame, app: &mut App, area: Rect) {
+    let config_area = create_centered_rect(area, 60, 40);
+
+    let config_block = Block::default()
         .borders(Borders::ALL)
+        .title(" Choix du Thème ")
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .style(Style::default().fg(Color::Cyan));
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1));
 
-    let area = create_centered_rect(area, 30, 30);
-    
-    f.render_widget(Clear, area); // Efface le fond pour que la popup soit lisible
-    f.render_widget(block.clone(), area);
+    f.render_widget(config_block.clone(), config_area);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2), // Marge haut
-            Constraint::Min(0),    // Menu
-            Constraint::Length(1), // Marge bas
-        ])
-        .margin(1)
-        .split(area);
+    let list_area = config_block.inner(config_area);
 
-    let menu_items = vec![
-        "Reprendre la partie",
-        "Aide / Commandes",
-        "Quitter vers le menu principal",
-        "Quitter le jeu",
-    ];
-
-    let items: Vec<ListItem> = menu_items
+    let items: Vec<ListItem> = app.setup_list_items
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let style = if i == app.pause_menu_index {
+            let style = if Some(i) == app.setup_list_state.selected() {
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
-            ListItem::new(Span::styled(format!(" {} ", item), style))
+            ListItem::new(format!(" {} ", item)).style(style)
         })
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::NONE))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_widget(list, layout[1]);
+    f.render_stateful_widget(list, list_area, &mut app.setup_list_state);
+    
+    // Instructions
+    let instructions = Paragraph::new(Line::from(vec![
+        Span::styled(" (Entrée) ", Style::default().fg(Color::Cyan)),
+        Span::raw("Valider   "),
+        Span::styled(" (Esc) ", Style::default().fg(Color::Cyan)),
+        Span::raw("Retour"),
+    ]))
+    .alignment(ratatui::layout::Alignment::Center);
+    
+    let instruction_area = Rect::new(config_area.x, config_area.y + config_area.height + 1, config_area.width, 1);
+    f.render_widget(instructions, instruction_area);
 }

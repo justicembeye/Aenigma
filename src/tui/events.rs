@@ -2,8 +2,9 @@ use std::io;
 
 use crossterm::event::{self, Event, KeyCode};
 use std::time::{Duration, Instant};
-use crate::tui::app::{App, AppState, Focus};
+use crate::tui::app::{App, AppState, Focus, Action};
 use crate::game::{Difficulty, Player, SecretWord, Rarity, ControlType, Game};
+use crate::game::events::GameEventType;
 use crate::game::dictionary;
 use rand::prelude::IndexedRandom;
 
@@ -149,10 +150,21 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                                 app.temp_players.clear();
                                                 app.setup_player_index = 0;
                                                 
-                                                // Transition vers la saisie du nom du premier joueur
-                                                app.current_state = AppState::SetupEnterPlayerName;
-                                                app.input.clear();
-                                                app.cursor_position = 0;
+                                                if app.is_solo {
+                                                    // Mode Solo : On choisit d'abord la méthode de sélection du thème
+                                                    app.current_state = AppState::SetupThemeSelectionMethod;
+                                                    app.setup_list_items = vec![
+                                                        "Je choisis le thème".to_string(),
+                                                        "L'adversaire choisit".to_string(),
+                                                        "Aléatoire".to_string(),
+                                                    ];
+                                                    app.setup_list_state.select(Some(0));
+                                                } else {
+                                                    // Transition vers la saisie du nom du premier joueur
+                                                    app.current_state = AppState::SetupEnterPlayerName;
+                                                    app.input.clear();
+                                                    app.cursor_position = 0;
+                                                }
                                             }
                                             _ => {}
                                         }
@@ -186,8 +198,147 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                 }
             }
         }
+        AppState::SelectPower => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Esc => app.current_state = AppState::Playing,
+                        KeyCode::Up => {
+                            let items_number = app.power_list_items.len();
+                            if items_number > 0 {
+                                let current_index = app.power_list_state.selected().unwrap_or(0);
+                                let new_index = if current_index > 0 {
+                                    current_index - 1
+                                } else {
+                                    items_number - 1
+                                };
+                                app.power_list_state.select(Some(new_index));
+                            }
+                        }
+                        KeyCode::Down => {
+                            let items_number = app.power_list_items.len();
+                            if items_number > 0 {
+                                let current_index = app.power_list_state.selected().unwrap_or(0);
+                                let new_index = if current_index < items_number - 1 {
+                                    current_index + 1
+                                } else {
+                                    0
+                                };
+                                app.power_list_state.select(Some(new_index));
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(selected) = app.power_list_state.selected() {
+                                // 0: Voyance, 1: Révélation
+                                // On prépare la liste des cibles
+                                app.target_list_items.clear();
+                                if let Some(game) = &app.game {
+                                    let current_player_id = game.current_player().id;
+                                    for player in &game.players {
+                                        if player.id != current_player_id && !player.is_eliminated {
+                                            app.target_list_items.push((player.id, player.name.clone()));
+                                        }
+                                    }
+                                }
+                                
+                                if !app.target_list_items.is_empty() {
+                                    // On sélectionne la première cible par défaut
+                                    app.target_list_state.select(Some(0));
+                                    app.current_state = AppState::SelectPowerTarget;
+                                } else {
+                                    app.notification = Some(("Aucune cible disponible !".to_string(), Instant::now()));
+                                    app.current_state = AppState::Playing;
+                                }
+                            }
+                        }
+
+
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        AppState::SelectPowerTarget => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Esc => app.current_state = AppState::SelectPower,
+                        KeyCode::Up => {
+                            let items_number = app.target_list_items.len();
+                            if items_number > 0 {
+                                let current_index = app.target_list_state.selected().unwrap_or(0);
+                                let new_index = if current_index > 0 { current_index - 1 } else { items_number - 1 };
+                                app.target_list_state.select(Some(new_index));
+                            }
+                        }
+                        KeyCode::Down => {
+                            let items_number = app.target_list_items.len();
+                            if items_number > 0 {
+                                let current_index = app.target_list_state.selected().unwrap_or(0);
+                                let new_index = if current_index < items_number - 1 { current_index + 1 } else { 0 };
+                                app.target_list_state.select(Some(new_index));
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(selected_target_idx) = app.target_list_state.selected() {
+                                if selected_target_idx < app.target_list_items.len() {
+                                    app.selected_target_id = Some(app.target_list_items[selected_target_idx].0);
+                                    
+                                    // Vérifier quel pouvoir est sélectionné
+                                    if let Some(power_idx) = app.power_list_state.selected() {
+                                        match power_idx {
+                                            0 => { // Voyance -> Demander une lettre
+                                                app.input.clear();
+                                                app.cursor_position = 0;
+                                                app.current_state = AppState::SelectPowerLetter;
+                                            }
+                                            1 => { // Révélation -> Exécuter direct
+                                                if let Some(game) = &mut app.game {
+                                                    let event = game.use_power(app.my_player_id.unwrap_or(0), app.selected_target_id.unwrap(), crate::game::PowerType::Revelation);
+                                                    app.last_action_result = event.public_log.clone();
+                                                    app.last_action_success = true;
+                                                    app.game_log.push(format!("> {}", event.public_log));
+                                                    app.current_state = AppState::TurnResult;
+                                                    app.result_timer = Some(Instant::now());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        AppState::SelectPowerLetter => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Esc => app.current_state = AppState::SelectPowerTarget,
+                        KeyCode::Char(c) if c.is_alphabetic() => {
+                             if let Some(game) = &mut app.game {
+                                 let event = game.use_power(app.my_player_id.unwrap_or(0), app.selected_target_id.unwrap(), crate::game::PowerType::Voyance(c));
+                                 app.last_action_result = event.public_log.clone();
+                                 app.last_action_success = true;
+                                 app.game_log.push(format!("> {}", event.public_log));
+                                 app.current_state = AppState::TurnResult;
+                                 app.result_timer = Some(Instant::now());
+                             }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         AppState::Playing => {
+
+
             // Vérifier si c'est au tour de l'IA
             let mut is_ai_turn = false;
             if let Some(game) = &app.game {
@@ -197,73 +348,169 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
             }
 
             if is_ai_turn {
-                // Logique IA
-                if let Some(game) = &mut app.game {
-                    let current_player_id = game.current_player().id;
-                    // Cible : le joueur humain (pour l'instant on suppose 1vs1 Solo)
-                    let target_id = game.players.iter().find(|p| p.id != current_player_id).map(|p| p.id).unwrap_or(0);
-                    
-                    let threat_level = game.get_threat_level(target_id);
+                // Logique IA avec délai
+                if app.ai_thinking_timer.is_none() {
+                    app.ai_thinking_timer = Some(Instant::now());
+                }
 
-                    // L'IA décide de son action
-                    let action = if let Some(ai) = &mut app.ai_opponent {
-                        ai.decide_action(&threat_level)
-                    } else {
-                        crate::game::ai::AIAction::ProposeLetter('?') // Fallback
-                    };
-
-                    match action {
-                        crate::game::ai::AIAction::GuessWord(word) => {
-                             let result = game.process_word_guess(current_player_id, target_id, word.clone(), crate::game::GuessType::Normal);
-                             app.last_action_result = result.clone();
-                             
-                             let lower_result = result.to_lowercase();
-                             if lower_result.contains("gagné") || lower_result.contains("éliminé") || lower_result.contains("correct") {
-                                  app.last_action_success = true;
-                             } else {
-                                  app.last_action_success = false;
-                             }
-                             app.game_log.push(format!("[Tour {}] IA (Devine): {}", game.get_current_round(), result));
-                        }
-                        crate::game::ai::AIAction::ProposeLetter(letter) => {
-                            let result = game.process_letter_proposal(current_player_id, target_id, letter);
-                            app.last_action_result = result.clone();
+                if let Some(timer) = app.ai_thinking_timer {
+                    if timer.elapsed() >= Duration::from_millis(2000) { // Délai de réflexion réduit à 2s pour fluidité
+                        // Le délai est passé, l'IA joue
+                        if let Some(game) = &mut app.game {
+                            let current_player_id = game.current_player().id;
+                            // Cible : le joueur humain (pour l'instant on suppose 1vs1 Solo)
+                            let target_id = game.players.iter().find(|p| p.id != current_player_id).map(|p| p.id).unwrap_or(0);
                             
-                            let lower_result = result.to_lowercase();
-                            if (lower_result.contains("correct") && !lower_result.contains("incorrect")) || lower_result.contains("trouvé") || lower_result.contains("gagné") || lower_result.contains("éliminé") || lower_result.contains("présente") {
-                                app.last_action_success = true;
-                            } else {
-                                app.last_action_success = false;
-                            }
-                            app.game_log.push(format!("[Tour {}] IA: {}", game.get_current_round(), result));
+                            let threat_level = game.get_threat_level(target_id);
 
-                            // Vérifier si le mot est entièrement découvert (Coup de Grâce pour l'IA)
-                            let new_threat_level = game.get_threat_level(target_id);
-                            if !new_threat_level.contains('_') {
-                                // L'IA enchaîne immédiatement avec l'élimination
-                                let target_secret = game.players.iter().find(|p| p.id == target_id).map(|p| p.secret_word.content.clone()).unwrap_or_default();
-                                let finish_result = game.process_word_guess(current_player_id, target_id, target_secret, crate::game::GuessType::Normal);
-                                
-                                app.last_action_result = finish_result.clone(); // On affiche le résultat final
-                                app.last_action_success = true;
-                                app.game_log.push(format!("[Tour {}] IA (FINISH HIM): {}", game.get_current_round(), finish_result));
+                            // L'IA décide de son action
+                            let action = if let Some(ai) = &mut app.ai_opponent {
+                                ai.decide_action(&threat_level)
+                            } else {
+                                crate::game::ai::AIAction::ProposeLetter('?') // Fallback
+                            };
+
+                            match action {
+                                crate::game::ai::AIAction::GuessWord(word) => {
+                                     // Gestion du Log Groupé (Local - Mot)
+                                    if game.get_current_round() > app.last_log_turn {
+                                        app.game_log.push(format!("> [Tour {}]", game.get_current_round()));
+                                        app.last_log_turn = game.get_current_round();
+                                    }
+                                     let event = game.process_word_guess(current_player_id, target_id, word.clone(), crate::game::GuessType::Normal);
+                                     
+                                     // On récupère le message public pour le log
+                                     let log_msg = event.public_log.clone();
+                                     app.last_action_result = log_msg.clone();
+                                     
+                                     if event.event_type == GameEventType::WordGuessed {
+                                          app.last_action_success = true;
+                                     } else {
+                                          app.last_action_success = false;
+                                     }
+                                     // Gestion du Log Groupé (IA)
+                                     if game.get_current_round() > app.last_log_turn {
+                                         app.game_log.push(format!("> [Tour {}]", game.get_current_round()));
+                                         app.last_log_turn = game.get_current_round();
+                                     }
+                                     app.game_log.push(format!("IA : {}", log_msg));
+
+                                     // Reset timers
+                                     app.ai_thinking_timer = None;
+                                     
+                                     // Check for Game Over
+                                     if let Some(winner_id) = game.check_for_winner() {
+                                         app.current_state = AppState::GameOver;
+                                         app.last_action_result = format!("VICTOIRE ! {} a gagné !", game.get_player_name(winner_id));
+                                     } else {
+                                         // Show result
+                                         app.current_state = AppState::TurnResult;
+                                         app.result_timer = Some(Instant::now());
+                                     }
+                                }
+                                crate::game::ai::AIAction::ProposeLetter(letter) => {
+                                    // 1. L'IA initie l'enquête
+                                    let event = game.initiate_inquiry(current_player_id, target_id, letter);
+                                    let log_msg = event.public_log.clone();
+                                    app.last_action_result = log_msg.clone();
+                                    
+                                    // 2. Si la cible est un HUMAIN LOCAL, on passe en mode "RespondToInquiry"
+                                    let target_is_human_local = if let Some(target) = game.players.iter().find(|p| p.id == target_id) {
+                                        target.control_type == ControlType::Human
+                                    } else {
+                                        false
+                                    };
+
+                                    if target_is_human_local {
+                                        // C'est au joueur humain de répondre !
+                                        app.last_action_result = format!("IA 🕵️ Moi : '{}' ?", letter);
+                                        // On loggue aussi dans le journal
+                                        app.game_log.push(format!("IA : {}", log_msg));
+                                        
+                                        // On passe en mode interactif
+                                        app.current_state = AppState::RespondToInquiry;
+                                        app.pending_inquiry = Some((current_player_id, letter));
+                                        app.pause_menu_index = 0; // Par défaut sur OUI (ou NON, à voir)
+                                        
+                                        // On arrête le timer de l'IA, c'est au joueur de jouer
+                                        app.ai_thinking_timer = None;
+                                        app.result_timer = None; 
+                                        
+                                        // On ne passe PAS en TurnResult, on attend la réponse du joueur
+                                    } else {
+                                        // Cible IA vs IA (Simulation)
+                                        // On résout immédiatement (ou avec un petit délai si on veut)
+                                        // L'IA répond toujours la vérité pour l'instant
+                                        // TODO: Faire mentir l'IA selon sa personnalité
+                                        // Pour l'instant on passe None pour la position (l'IA ne précise pas encore)
+                                        let event = game.resolve_inquiry(current_player_id, target_id, letter, true, vec![]);
+                                        let log_msg = event.public_log.clone();
+                                        app.last_action_result = log_msg.clone();
+                                        app.last_action_success = event.event_type == GameEventType::LetterFound;
+                                        
+                                        app.game_log.push(format!("IA : {}", log_msg));
+                                        
+                                        // Fin du tour normale
+                                        app.current_state = AppState::TurnResult;
+                                        app.result_timer = Some(Instant::now());
+                                        app.ai_thinking_timer = None;
+                                        
+                                        // Vérifier Coup de Grâce
+                                        let new_threat_level = game.get_threat_level(target_id);
+                                        if !new_threat_level.contains('_') {
+                                            let target_secret = game.players.iter().find(|p| p.id == target_id).map(|p| p.secret_word.content.clone()).unwrap_or_default();
+                                            let finish_event = game.process_word_guess(current_player_id, target_id, target_secret, crate::game::GuessType::Normal);
+                                            app.last_action_result = finish_event.public_log.clone();
+                                            app.last_action_success = true;
+                                            app.game_log.push(format!("IA 💀 {}", finish_event.public_log));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    
-                    app.current_state = AppState::TurnResult;
                 }
-            } else {
+
+
+
+                }
+
+                // Logique Joueur Humain (toujours active si ce n'est pas le tour de l'IA)
                 // Logique Joueur Humain
                 if event::poll(Duration::from_millis(100))? {
                     if let Event::Key(key) = event::read()? {
                         match key.code {
-                            KeyCode::Char('q') => app.running = false,
+                            KeyCode::Char('q') => {
+                                app.previous_state = Some(AppState::Playing);
+                                app.current_state = AppState::ConfirmQuit;
+                                app.pause_menu_index = 1; // Par défaut sur "Non"
+                            }
                             KeyCode::Esc => app.current_state = AppState::Paused,
                             KeyCode::Tab => {
+                                // Vérifier si la grille de pouvoirs est visible
+                                let should_show_powers = if let Some(game) = &app.game {
+                                    let my_id = app.my_player_id.unwrap_or(1);
+                                    if let Some(player) = game.players.iter().find(|p| p.id == my_id) {
+                                        player.energy >= 100 && game.difficulty != crate::game::Difficulty::Easy
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+
                                 app.current_focus = match app.current_focus {
-                                    Focus::Actions => Focus::System,
-                                    Focus::System => Focus::Actions,
+                                    Focus::Actions => {
+                                        if should_show_powers {
+                                            Focus::Powers
+                                        } else {
+                                            Focus::Notebook
+                                        }
+                                    },
+                                    Focus::Powers => Focus::Notebook,
+                                    Focus::Notebook => Focus::System,
+                                    Focus::System => Focus::GameLog,
+                                    Focus::GameLog => Focus::Actions,
                                 };
                             }
                             KeyCode::Down => {
@@ -292,6 +539,13 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             app.system_list_state.select(Some(new_index));
                                         }
                                     }
+                                    Focus::Powers => {
+                                        // Powers grid uses Left/Right, not Up/Down
+                                    }
+                                    Focus::GameLog => {
+                                        // Down ne fait plus rien pour le log
+                                    }
+                                    Focus::Notebook => {}
                                 }
                             }
                             KeyCode::Right => {
@@ -306,6 +560,28 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                         };
                                         app.system_list_state.select(Some(new_index));
                                     }
+                                 } else if app.current_focus == Focus::Powers {
+                                    let items_number = app.power_list_items.len();
+                                    if items_number > 0 {
+                                        let current_index = app.power_grid_state.selected().unwrap_or(0);
+                                        let new_index = if current_index < items_number - 1 {
+                                            current_index + 1
+                                        } else {
+                                            0
+                                        };
+                                        app.power_grid_state.select(Some(new_index));
+                                    }
+                                 } else if app.current_focus == Focus::GameLog {
+                                    // Right = Tour plus ancien (augmenter offset)
+                                    app.log_scroll_offset = app.log_scroll_offset.saturating_add(1);
+                                 } else if app.current_focus == Focus::Notebook {
+                                    // Carousel Navigation (Next Opponent)
+                                    if let Some(game) = &app.game {
+                                        let opponents_count = game.players.len().saturating_sub(1);
+                                        if opponents_count > 1 {
+                                            app.selected_opponent_index = (app.selected_opponent_index + 1) % opponents_count;
+                                        }
+                                    }
                                  }
                             }
                             KeyCode::Left => {
@@ -319,6 +595,32 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             items_number - 1
                                         };
                                         app.system_list_state.select(Some(new_index));
+                                    }
+                                 } else if app.current_focus == Focus::Powers {
+                                    let items_number = app.power_list_items.len();
+                                    if items_number > 0 {
+                                        let current_index = app.power_grid_state.selected().unwrap_or(0);
+                                        let new_index = if current_index > 0 {
+                                            current_index - 1
+                                        } else {
+                                            items_number - 1
+                                        };
+                                        app.power_grid_state.select(Some(new_index));
+                                    }
+                                 } else if app.current_focus == Focus::GameLog {
+                                    // Left = Tour plus récent (diminuer offset)
+                                    app.log_scroll_offset = app.log_scroll_offset.saturating_sub(1);
+                                 } else if app.current_focus == Focus::Notebook {
+                                    // Carousel Navigation (Previous Opponent)
+                                    if let Some(game) = &app.game {
+                                        let opponents_count = game.players.len().saturating_sub(1);
+                                        if opponents_count > 1 {
+                                            if app.selected_opponent_index == 0 {
+                                                app.selected_opponent_index = opponents_count - 1;
+                                            } else {
+                                                app.selected_opponent_index -= 1;
+                                            }
+                                        }
                                     }
                                  }
                             }
@@ -348,10 +650,25 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             app.system_list_state.select(Some(new_index));
                                         }
                                     }
+                                    Focus::Powers => {
+                                        // Powers grid uses Left/Right, not Up/Down
+                                    }
+                                    Focus::GameLog => {
+                                        // Up ne fait plus rien pour le log
+                                    }
+                                    Focus::Notebook => {}
                                 }
                             }
                             KeyCode::Enter => {
                                 match app.current_focus {
+                                    Focus::Notebook => {}
+                                    Focus::Powers => {
+                                        // Transition vers SelectPower avec le pouvoir sélectionné
+                                        if let Some(selected_index) = app.power_grid_state.selected() {
+                                            app.power_list_state.select(Some(selected_index));
+                                            app.current_state = AppState::SelectPower;
+                                        }
+                                    }
                                     Focus::Actions => {
                                         // Vérification du tour en multijoueur
                                         let mut is_my_turn = true;
@@ -367,97 +684,103 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             app.last_action_result = "Ce n'est pas votre tour !".to_string();
                                             app.last_action_success = false;
                                         } else if let Some(selected_index) = app.playing_list_state.selected() {
-                                            match selected_index {
-                                                0 => { // Proposer une lettre
-                                                    // On peuple la liste des cibles
-                                                    app.target_list_items.clear();
-                                                    if let Some(game) = &app.game {
-                                                        let current_player_id = game.current_player().id;
-                                                        for player in &game.players {
-                                                            if player.id != current_player_id && !player.is_eliminated {
-                                                                app.target_list_items.push((player.id, player.name.clone()));
-                                                            }
-                                                        }
-                                                    }
-                                                    
-                                                    // Si une seule cible, on la sélectionne automatiquement
-                                                    if app.target_list_items.len() == 1 {
-                                                        app.selected_target_id = Some(app.target_list_items[0].0);
-                                                        app.current_state = AppState::InputLetter;
-                                                        app.input.clear();
-                                                        app.cursor_position = 0;
-                                                    } else {
-                                                        app.current_state = AppState::SelectTarget;
-                                                        app.target_list_state.select(Some(0));
-                                                    }
-                                                }
-                                                1 => { // Deviner un mot
-                                                    // On peuple la liste des cibles (idem)
-                                                    app.target_list_items.clear();
-                                                    if let Some(game) = &app.game {
-                                                        let current_player_id = game.current_player().id;
-                                                        for player in &game.players {
-                                                            if player.id != current_player_id && !player.is_eliminated {
-                                                                app.target_list_items.push((player.id, player.name.clone()));
-                                                            }
-                                                        }
-                                                    }
-                                                    
-                                                    // Si une seule cible, on la sélectionne automatiquement
-                                                    if app.target_list_items.len() == 1 {
-                                                        app.selected_target_id = Some(app.target_list_items[0].0);
-                                                        app.current_state = AppState::InputGuess;
-                                                        app.input.clear();
-                                                        app.cursor_position = 0;
-                                                    } else {
-                                                        app.current_state = AppState::SelectTarget;
-                                                        app.target_list_state.select(Some(0));
-                                                    }
-                                                }
-                                                2 => { // Buzzer
-                                                    if let Some(game) = &app.game {
-                                                        let current_player = game.current_player();
-                                                        if current_player.energy < 100 {
-                                                            app.game_log.push(format!("⚠️ Buzz non chargé ! ({}%)", current_player.energy));
-                                                            if app.game_log.len() > 10 {
-                                                                app.game_log.remove(0);
-                                                            }
-                                                        } else {
-                                                            // On peuple la liste des cibles (idem)
-                                                            app.target_list_items.clear();
-                                                            let current_player_id = current_player.id;
+                                            if selected_index < app.available_actions.len() {
+                                                match app.available_actions[selected_index] {
+                                                    Action::ProposeLetter => {
+                                                        // On peuple la liste des cibles
+                                                        app.target_list_items.clear();
+                                                        if let Some(game) = &app.game {
+                                                            let current_player_id = game.current_player().id;
                                                             for player in &game.players {
                                                                 if player.id != current_player_id && !player.is_eliminated {
                                                                     app.target_list_items.push((player.id, player.name.clone()));
                                                                 }
                                                             }
-                                                            
-                                                            // Si une seule cible, on la sélectionne automatiquement
-                                                            if app.target_list_items.len() == 1 {
-                                                                app.selected_target_id = Some(app.target_list_items[0].0);
-                                                                app.current_state = AppState::InputGuess;
-                                                                app.input.clear();
-                                                                app.cursor_position = 0;
+                                                        }
+                                                        
+                                                        // Si une seule cible, on la sélectionne automatiquement
+                                                        if app.target_list_items.len() == 1 {
+                                                            app.selected_target_id = Some(app.target_list_items[0].0);
+                                                            app.current_state = AppState::InputLetter;
+                                                            app.input.clear();
+                                                            app.cursor_position = 0;
+                                                        } else {
+                                                            app.current_state = AppState::SelectTarget;
+                                                            app.target_list_state.select(Some(0));
+                                                        }
+                                                    }
+                                                    Action::GuessWord => {
+                                                        // On peuple la liste des cibles (idem)
+                                                        app.target_list_items.clear();
+                                                        if let Some(game) = &app.game {
+                                                            let current_player_id = game.current_player().id;
+                                                            for player in &game.players {
+                                                                if player.id != current_player_id && !player.is_eliminated {
+                                                                    app.target_list_items.push((player.id, player.name.clone()));
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        // Si une seule cible, on la sélectionne automatiquement
+                                                        if app.target_list_items.len() == 1 {
+                                                            app.selected_target_id = Some(app.target_list_items[0].0);
+                                                            app.current_state = AppState::InputGuess;
+                                                            app.input.clear();
+                                                            app.cursor_position = 0;
+                                                        } else {
+                                                            app.current_state = AppState::SelectTarget;
+                                                            app.target_list_state.select(Some(0));
+                                                        }
+                                                    }
+                                                    Action::Buzz => {
+                                                        if let Some(game) = &app.game {
+                                                            let current_player = game.current_player();
+                                                            if current_player.energy < 100 {
+                                                                app.game_log.push(format!("⚠️ Buzz non prêt ({}%)", current_player.energy));
+                                                                if app.game_log.len() > 10 {
+                                                                    app.game_log.remove(0);
+                                                                }
                                                             } else {
-                                                                app.current_state = AppState::SelectTarget;
-                                                                app.target_list_state.select(Some(0));
+                                                                // On peuple la liste des cibles (idem)
+                                                                app.target_list_items.clear();
+                                                                let current_player_id = current_player.id;
+                                                                for player in &game.players {
+                                                                    if player.id != current_player_id && !player.is_eliminated {
+                                                                        app.target_list_items.push((player.id, player.name.clone()));
+                                                                    }
+                                                                }
+                                                                
+                                                                // Si une seule cible, on la sélectionne automatiquement
+                                                                if app.target_list_items.len() == 1 {
+                                                                    app.selected_target_id = Some(app.target_list_items[0].0);
+                                                                    app.current_state = AppState::InputGuess;
+                                                                    app.input.clear();
+                                                                    app.cursor_position = 0;
+                                                                } else {
+                                                                    app.current_state = AppState::SelectTarget;
+                                                                    app.target_list_state.select(Some(0));
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
-                                                3 => { // Passer son tour
-                                                    if let Some(game) = &mut app.game {
-                                                        game.next_turn();
-                                                        app.last_action_success = true;
-                                                        app.last_action_result = "Vous avez passé votre tour.".to_string();
-                                                        app.game_log.push(format!("[Tour {}] {}: {}", game.get_current_round(), game.current_player().name, app.last_action_result));
-                                                        if app.game_log.len() > 10 {
-                                                            app.game_log.remove(0);
+                                                    Action::UsePower => {
+                                                        app.current_state = AppState::SelectPower;
+                                                        app.power_list_state.select(Some(0));
+                                                    }
+                                                    Action::SkipTurn => {
+                                                        if let Some(game) = &mut app.game {
+                                                            // Ajouter un marqueur de tour au log AVANT next_turn
+                                                            app.game_log.push(format!("> [Tour {}]", game.get_current_round()));
+                                                            
+                                                            game.next_turn();
+                                                            app.update_available_actions(); // Mise à jour des actions
+                                                            
+                                                            // Passer directement à Playing pour que l'IA joue
+                                                            app.current_state = AppState::Playing;
+                                                            app.ai_thinking_timer = None;
                                                         }
-                                                        app.current_state = AppState::TurnResult;
                                                     }
                                                 }
-                                                _ => {}
                                             }
                                         }
                                     }
@@ -468,12 +791,17 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                                     app.current_state = AppState::Paused;
                                                 }
                                                 1 => { // Quitter
-                                                    app.running = false;
+                                                    app.previous_state = Some(AppState::Playing);
+                                                    app.current_state = AppState::ConfirmQuit;
+                                                    app.pause_menu_index = 1; // Par défaut sur "Non"
                                                 }
                                                 _ => {}
                                             }
 
-                                        }
+                                         }
+                                    }
+                                    Focus::GameLog => {
+                                        // Pas d'action sur Enter pour le log
                                     }
                                 }
                             }
@@ -481,13 +809,16 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                         }
                     }
                 }
-            }
         }
         AppState::SelectTarget => {
              if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
-                        KeyCode::Char('q') => app.running = false,
+                        KeyCode::Char('q') => {
+                            app.previous_state = Some(AppState::SelectTarget); // Ou Playing ? SelectTarget est un sous-état de Playing
+                            app.current_state = AppState::ConfirmQuit;
+                            app.pause_menu_index = 1; // Par défaut sur "Non"
+                        }
                         KeyCode::Esc => app.current_state = AppState::Playing,
                         KeyCode::Up => {
                             let items_len = app.target_list_items.len();
@@ -605,42 +936,57 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             // On passe en attente (ou TurnResult direct, en attendant le retour réseau)
                                             app.current_state = AppState::TurnResult;
                                             app.last_action_result = "Envoi au serveur...".to_string();
+                                            app.result_timer = Some(Instant::now());
                                         } else {
                                             // MODE LOCAL (Code existant)
-                                            let result = game.process_letter_proposal(current_player_id, target_id, letter);
+                                            // 1. On initie l'enquête
+                                            let event = game.initiate_inquiry(current_player_id, target_id, letter);
                                             
-                                            // On détermine si c'est un succès ou un échec pour la couleur du popup
-                                            let lower_result = result.to_lowercase();
-                                            if (lower_result.contains("correct") && !lower_result.contains("incorrect")) || lower_result.contains("trouvé") || lower_result.contains("gagné") || lower_result.contains("éliminé") {
-                                                app.last_action_success = true;
+                                            // 2. Si la cible est un joueur humain LOCAL, on passe en mode "Réponse"
+                                            // En solo, le joueur 1 (index 0) est local.
+                                            // Si c'est l'IA qui est visée, elle répondra automatiquement (dans la boucle principale)
+                                            
+                                            let target_is_human_local = if let Some(target) = game.players.iter().find(|p| p.id == target_id) {
+                                                target.control_type == ControlType::Human
                                             } else {
-                                                app.last_action_success = false;
-                                            }
-                                            app.last_action_result = result.clone();
-                                            app.game_log.push(format!("[Tour {}] {}: {}", game.get_current_round(), game.current_player().name, result));
-                                            if app.game_log.len() > 10 {
-                                                app.game_log.remove(0);
-                                            }
-                                            
-                                            // Vérifier si le mot est entièrement découvert (Coup de Grâce)
-                                            let threat_level = game.get_threat_level(target_id);
-                                            if !threat_level.contains('_') {
-                                                // COUP DE GRÂCE !
-                                                app.last_action_success = true;
-                                                app.game_log.push(format!("[Tour {}] {}: {} -> FINISH HIM !", game.get_current_round(), game.current_player().name, result));
-                                                if app.game_log.len() > 10 {
-                                                    app.game_log.remove(0);
-                                                }
+                                                false
+                                            };
+
+                                            if target_is_human_local {
+                                                // C'est à MOI de répondre !
+                                                // Mais attendez, si JE suis le joueur courant, je ne peux pas m'interroger moi-même.
+                                                // Donc ce cas n'arrive que si je joue en "Hotseat" (plusieurs humains sur le même PC).
+                                                // Pour l'instant, assumons Solo vs AI.
+                                                // Si je vise l'IA, l'événement est InquiryInitiated.
                                                 
-                                                // On passe directement en mode "Deviner" pour l'élimination
-                                                app.current_state = AppState::InputGuess;
-                                                app.input.clear();
-                                                app.cursor_position = 0;
-                                                // app.selected_target_id est déjà set
-                                                return Ok(()); // On sort pour ne pas reset l'état en bas
+                                                app.last_action_result = "En attente de la réponse de l'IA...".to_string();
+                                                app.last_action_success = true; // Neutre pour l'instant
+                                                
+                                                // On ajoute au log
+                                                let msg = event.get_message_for(current_player_id);
+                                                app.game_log.push(format!("> {}", msg));
+                                                
+                                                // On passe le tour à l'IA pour qu'elle réponde (simulation)
+                                                // On utilise un timer pour simuler la réflexion
+                                                app.ai_thinking_timer = Some(Instant::now());
+                                                app.current_state = AppState::TurnResult; // On attend
+                                                app.result_timer = None; // Pas de timer auto pour fermer, c'est l'IA qui déclenchera la suite
+                                                
+                                                // On stocke l'enquête en cours pour que l'IA sache quoi faire
+                                                app.pending_inquiry = Some((current_player_id, letter));
+
                                             } else {
-                                                // Fin du tour normale
+                                                // Cible IA : On simule la réponse
+                                                app.last_action_result = "Interrogatoire en cours...".to_string();
+                                                app.last_action_success = true;
+                                                
+                                                let msg = event.get_message_for(current_player_id);
+                                                app.game_log.push(format!("> {}", msg));
+
+                                                app.ai_thinking_timer = Some(Instant::now());
                                                 app.current_state = AppState::TurnResult;
+                                                app.result_timer = None; // On attend la réponse de l'IA
+                                                app.pending_inquiry = Some((current_player_id, letter));
                                             }
                                         }
                                     }
@@ -699,6 +1045,7 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             
                                             app.current_state = AppState::TurnResult;
                                             app.last_action_result = "Envoi au serveur...".to_string();
+                                            app.result_timer = Some(Instant::now());
                                         } else {
                                             // MODE LOCAL
                                             let guess_type = if app.playing_list_state.selected() == Some(2) {
@@ -707,18 +1054,25 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                                 crate::game::GuessType::Normal
                                             };
 
-                                            let result = game.process_word_guess(current_player_id, target_id, app.input.clone(), guess_type);
+                                            let event = game.process_word_guess(current_player_id, target_id, app.input.clone(), guess_type);
                                             
                                             // On détermine si c'est un succès ou un échec pour la couleur du popup
-                                            // On cherche des mots clés positifs
-                                            let lower_result = result.to_lowercase();
-                                            if (lower_result.contains("correct") && !lower_result.contains("incorrect")) || lower_result.contains("trouvé") || lower_result.contains("gagné") || lower_result.contains("éliminé") {
+                                            if event.event_type == GameEventType::WordGuessed {
                                                 app.last_action_success = true;
                                             } else {
                                                 app.last_action_success = false;
                                             }
-                                            app.last_action_result = result.clone();
-                                            app.game_log.push(format!("[Tour {}] {}: {}", game.get_current_round(), game.current_player().name, result));
+                                            
+                                            // En local, on est le joueur actif
+                                            let msg = event.get_message_for(current_player_id);
+                                            app.last_action_result = msg.clone();
+                                            
+                                            // Gestion du Log Groupé
+                                            if game.get_current_round() > app.last_log_turn {
+                                                app.game_log.push(format!("> [Tour {}]", game.get_current_round()));
+                                                app.last_log_turn = game.get_current_round();
+                                            }
+                                            app.game_log.push(format!("{}: {}", game.current_player().name, msg));
                                             if app.game_log.len() > 10 {
                                                 app.game_log.remove(0);
                                             }
@@ -726,12 +1080,14 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                         
                                         // Fin du tour
                                         app.current_state = AppState::TurnResult;
+                                        app.result_timer = Some(Instant::now());
                                     }
                                 }
                                 app.input.clear();
                                 app.cursor_position = 0;
                             }
                         }
+
                         KeyCode::Esc => {
                             app.input.clear();
                             app.cursor_position = 0;
@@ -743,6 +1099,70 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
              }
         }
         AppState::TurnResult => {
+            // Auto-dismiss après 2 secondes (plus lisible)
+            if let Some(timer) = app.result_timer {
+                if timer.elapsed() >= Duration::from_millis(2000) {
+                     if let Some(game) = &mut app.game {
+                        // Ajouter marqueur de tour AVANT next_turn
+                        app.game_log.push(format!("> [Tour {}]", game.get_current_round()));
+                        game.next_turn();
+                    }
+                    app.current_state = AppState::Playing;
+                    app.update_available_actions(); // Mise à jour des actions au nouveau tour
+                    app.result_timer = None;
+                    
+                    // On vérifie si le jeu est fini
+                    if let Some(game) = &mut app.game {
+                        if let Some(_) = game.check_for_winner() {
+                            game.final_duration = Some(game.start_time.elapsed());
+                            app.current_state = AppState::GameOver;
+                        }
+                    }
+                }
+            } else if let Some(timer) = app.ai_thinking_timer {
+                // L'IA réfléchit pour répondre à une enquête
+                if timer.elapsed() >= Duration::from_millis(2000) {
+                     if let Some((attacker_id, letter)) = app.pending_inquiry {
+                         if let Some(game) = &mut app.game {
+                             // L'IA répond
+                             let target_id = game.players.iter().find(|p| p.id != attacker_id).map(|p| p.id).unwrap_or(1);
+                             
+                             // On vérifie si l'IA a la lettre pour qu'elle réponde la vérité
+                             let ai_player = game.players.iter().find(|p| p.id == target_id);
+                             let ai_has_letter = ai_player
+                                 .map(|p| p.secret_word.content.to_uppercase().contains(letter))
+                                 .unwrap_or(false);
+
+                             // Calculer les positions de la lettre si l'IA l'a
+                             let mut ai_positions = Vec::new();
+                             if ai_has_letter {
+                                 if let Some(ai_p) = ai_player {
+                                     let secret = ai_p.secret_word.content.to_uppercase();
+                                     for (idx, c) in secret.chars().enumerate() {
+                                         if c == letter {
+                                             ai_positions.push(idx + 1); // Position 1-indexed
+                                         }
+                                     }
+                                 }
+                             }
+
+                             // Résolution avec positions
+                             let event = game.resolve_inquiry(attacker_id, target_id, letter, ai_has_letter, ai_positions);
+                             let log_msg = event.public_log.clone();
+                             app.last_action_result = log_msg.clone();
+                             app.last_action_success = event.event_type == GameEventType::LetterFound;
+                             
+                             app.game_log.push(format!("> {}", log_msg));
+                             
+                             // On active le timer pour fermer le popup
+                             app.result_timer = Some(Instant::now());
+                             app.ai_thinking_timer = None;
+                             app.pending_inquiry = None;
+                         }
+                     }
+                }
+            }
+
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
@@ -752,6 +1172,8 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                 game.next_turn();
                             }
                             app.current_state = AppState::Playing;
+                            app.update_available_actions(); // Mise à jour des actions au nouveau tour
+                            app.result_timer = None;
                             // On vérifie si le jeu est fini
                             if let Some(game) = &mut app.game {
                                 if let Some(_) = game.check_for_winner() {
@@ -814,11 +1236,45 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                         "Quitter".to_string(),
                                     ];
                                 }
-                                3 => app.running = false, // Quitter Jeu
+                                3 => { // Quitter Jeu
+                                    app.previous_state = Some(AppState::Paused);
+                                    app.current_state = AppState::ConfirmQuit;
+                                    app.pause_menu_index = 1; // Par défaut sur "Non"
+                                }
                                 _ => {}
                             }
                         }
                         KeyCode::Esc => app.current_state = AppState::Playing, // Reprendre
+                        _ => {}
+                    }
+                }
+            }
+        }
+        AppState::ConfirmQuit => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Left | KeyCode::Right => {
+                            // Bascule entre 0 (Oui) et 1 (Non)
+                            if app.pause_menu_index == 0 {
+                                app.pause_menu_index = 1;
+                            } else {
+                                app.pause_menu_index = 0;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if app.pause_menu_index == 0 {
+                                // Oui -> Quitter
+                                app.running = false;
+                            } else {
+                                // Non -> Retour
+                                app.current_state = app.previous_state.take().unwrap_or(AppState::Playing);
+                            }
+                        }
+                        KeyCode::Esc => {
+                            // Annuler -> Retour
+                            app.current_state = app.previous_state.take().unwrap_or(AppState::Playing);
+                        }
                         _ => {}
                     }
                 }
@@ -866,12 +1322,98 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                 app.temp_players.push(player);
                                 app.current_setup_name = app.input.clone();
                                 
-                                // Passage à la sélection du thème
-                                app.current_state = AppState::SetupSelectTheme;
-                                app.setup_list_items = dictionary::get_themes(app.difficulty).iter().map(|s| s.to_string()).collect();
-                                app.setup_list_state.select(Some(0));
+                                // Passage à l'étape suivante
+                                if app.is_solo {
+                                    // En solo, le thème est déjà choisi, on va directement au mot secret
+                                    app.current_state = AppState::SetupEnterSecretWord;
+                                } else {
+                                    // En multi, on choisit le thème maintenant
+                                    app.current_state = AppState::SetupSelectTheme;
+                                    app.setup_list_items = dictionary::get_all_themes();
+                                    app.setup_list_state.select(Some(0));
+                                }
                                 app.input.clear();
                                 app.cursor_position = 0;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            // Retour au setup précédent (Difficulté)
+                            app.setup_step = 1;
+                            app.current_state = AppState::Setup;
+                            app.setup_list_items = vec![
+                                "Facile".to_string(),
+                                "Normal".to_string(),
+                                "Difficile".to_string(),
+                                "Expert".to_string(),
+                            ];
+                            app.setup_list_state.select(Some(1));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        AppState::SetupThemeSelectionMethod => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Down => {
+                            let i = match app.setup_list_state.selected() {
+                                Some(i) => {
+                                    if i >= app.setup_list_items.len() - 1 {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            app.setup_list_state.select(Some(i));
+                        }
+                        KeyCode::Up => {
+                            let i = match app.setup_list_state.selected() {
+                                Some(i) => {
+                                    if i == 0 {
+                                        app.setup_list_items.len() - 1
+                                    } else {
+                                        i - 1
+                                    }
+                                }
+                                None => 0,
+                            };
+                            app.setup_list_state.select(Some(i));
+                        }
+                        KeyCode::Enter => {
+                            if let Some(selected) = app.setup_list_state.selected() {
+                                match selected {
+                                    0 => { // Je choisis le thème
+                                        app.current_state = AppState::SetupSelectTheme;
+                                        app.setup_list_items = dictionary::get_all_themes();
+                                        app.setup_list_state.select(Some(0));
+                                    }
+                                    1 | 2 => { // L'adversaire choisit OU Aléatoire
+                                        // Choix aléatoire
+                                        let themes = dictionary::get_all_themes();
+                                        let mut rng = rand::rng();
+                                        let selected_theme = themes.choose(&mut rng).unwrap_or(&"Technologie".to_string()).to_string();
+                                        app.current_setup_theme = selected_theme.clone();
+                                        
+                                        // Choix aléatoire du sous-thème
+                                        let sub_themes = dictionary::get_sub_themes(&selected_theme);
+                                        if !sub_themes.is_empty() {
+                                            let selected_sub = sub_themes.choose(&mut rng).cloned();
+                                            app.current_setup_sub_theme = selected_sub;
+                                        } else {
+                                            app.current_setup_sub_theme = None;
+                                        }
+
+                                        // Transition vers la saisie du nom (on saute la sélection manuelle)
+                                        app.current_state = AppState::SetupEnterPlayerName;
+                                        app.input.clear();
+                                        app.cursor_position = 0;
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         KeyCode::Esc => {
@@ -923,15 +1465,29 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(selected) = app.setup_list_state.selected() {
-                                let themes = dictionary::get_themes(app.difficulty);
+                                let themes = dictionary::get_all_themes();
                                 if selected < themes.len() {
                                     let selected_theme = themes[selected].to_string();
                                     app.current_setup_theme = selected_theme.clone();
                                     
-                                    // Passage à la saisie du mot secret
-                                    app.current_state = AppState::SetupEnterSecretWord;
-                                    app.input.clear();
-                                    app.cursor_position = 0;
+                                    // Vérifier s'il y a des sous-thèmes
+                                    let sub_themes = dictionary::get_sub_themes(&selected_theme);
+                                    if !sub_themes.is_empty() {
+                                        app.current_state = AppState::SetupSelectSubTheme;
+                                        app.setup_list_items = vec!["Général (Tous)".to_string()];
+                                        app.setup_list_items.extend(sub_themes);
+                                        app.setup_list_state.select(Some(0));
+                                    } else {
+                                        app.current_setup_sub_theme = None;
+                                        // Passage à l'étape suivante
+                                        if app.is_solo {
+                                            app.current_state = AppState::SetupEnterPlayerName;
+                                        } else {
+                                            app.current_state = AppState::SetupEnterSecretWord;
+                                        }
+                                        app.input.clear();
+                                        app.cursor_position = 0;
+                                    }
                                 }
                             }
                         }
@@ -947,22 +1503,106 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                 }
             }
         }
+        AppState::SetupSelectSubTheme => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Down => {
+                            let i = match app.setup_list_state.selected() {
+                                Some(i) => if i >= app.setup_list_items.len() - 1 { 0 } else { i + 1 },
+                                None => 0,
+                            };
+                            app.setup_list_state.select(Some(i));
+                        }
+                        KeyCode::Up => {
+                            let i = match app.setup_list_state.selected() {
+                                Some(i) => if i == 0 { app.setup_list_items.len() - 1 } else { i - 1 },
+                                None => 0,
+                            };
+                            app.setup_list_state.select(Some(i));
+                        }
+                        KeyCode::Enter => {
+                            if let Some(selected) = app.setup_list_state.selected() {
+                                if selected < app.setup_list_items.len() {
+                                    let selected_sub = app.setup_list_items[selected].clone();
+                                    app.current_setup_sub_theme = Some(selected_sub);
+
+                                    // Passage à l'étape suivante
+                                    if app.is_solo {
+                                        app.current_state = AppState::SetupEnterPlayerName;
+                                    } else {
+                                        app.current_state = AppState::SetupEnterSecretWord;
+                                    }
+                                    app.input.clear();
+                                    app.cursor_position = 0;
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            // Retour au choix du thème
+                            app.current_state = AppState::SetupSelectTheme;
+                            app.setup_list_items = dictionary::get_all_themes();
+                            app.setup_list_state.select(Some(0));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         AppState::SetupEnterSecretWord => {
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
+                        KeyCode::Tab => {
+                            // Trigger Autocomplete
+                            let suggestions = dictionary::get_suggestions(&app.input, &app.current_setup_theme, app.current_setup_sub_theme.as_deref());
+                            if !suggestions.is_empty() {
+                                app.suggestions = suggestions;
+                                app.show_suggestions = true;
+                                app.suggestion_index = 0;
+                            } else {
+                                app.show_suggestions = false;
+                            }
+                        }
+                        KeyCode::Down if app.show_suggestions => {
+                            if app.suggestion_index < app.suggestions.len() - 1 {
+                                app.suggestion_index += 1;
+                            } else {
+                                app.suggestion_index = 0;
+                            }
+                        }
+                        KeyCode::Up if app.show_suggestions => {
+                            if app.suggestion_index > 0 {
+                                app.suggestion_index -= 1;
+                            } else {
+                                app.suggestion_index = app.suggestions.len() - 1;
+                            }
+                        }
+                        KeyCode::Esc if app.show_suggestions => {
+                            app.show_suggestions = false;
+                        }
                         KeyCode::Char(c) if c.is_alphabetic() => {
                             app.input.push(c.to_ascii_uppercase());
                             app.cursor_position += 1;
+                            app.show_suggestions = false; // Hide on typing
                         }
                         KeyCode::Backspace => {
                             if !app.input.is_empty() {
                                 app.input.pop();
                                 app.cursor_position -= 1;
+                                app.show_suggestions = false; // Hide on typing
                             }
                         }
                         KeyCode::Enter => {
-                            let word_len = app.input.trim().len();
+                            if app.show_suggestions {
+                                // Select suggestion
+                                if app.suggestion_index < app.suggestions.len() {
+                                    app.input = app.suggestions[app.suggestion_index].clone();
+                                    app.cursor_position = app.input.len();
+                                    app.show_suggestions = false;
+                                }
+                            } else {
+                                let word_len = app.input.trim().len();
                             let (min_len, max_len) = match app.difficulty {
                                 Difficulty::Easy => (3, 6),
                                 Difficulty::Normal => (4, 8),
@@ -1003,16 +1643,27 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                             }
                                         }
                                         _ => {
-                                            // En Normal/Difficile, l'IA choisit un thème aléatoire PARMI CEUX DISPONIBLES
-                                            let themes = dictionary::get_themes(app.difficulty);
+                                            // En Normal/Difficile, l'IA choisit un thème aléatoire
+                                            let themes = dictionary::get_all_themes();
                                             let mut rng = rand::rng();
-                                            themes.choose(&mut rng).unwrap_or(&"Technologie").to_string()
+                                            themes.choose(&mut rng).unwrap_or(&"Technologie".to_string()).to_string()
                                         }
                                     };
                                     
-                                    let secret_word = dictionary::get_random_word(&ai_theme, app.difficulty);
+                                    // Choix du sous-thème IA (aléatoire ou "Tout")
+                                    let ai_sub_theme = {
+                                        let subs = dictionary::get_sub_themes(&ai_theme);
+                                        if !subs.is_empty() {
+                                            let mut rng = rand::rng();
+                                            Some(subs.choose(&mut rng).unwrap().clone())
+                                        } else {
+                                            None
+                                        }
+                                    };
+
+                                    let secret_word = dictionary::get_random_word(&ai_theme, ai_sub_theme.as_deref());
                                     
-                                    let mut ai_player = Player::new(2, "IA (Ordinateur)", secret_word);
+                                    let mut ai_player = Player::new(1, "IA (Ordinateur)", secret_word);
                                     ai_player.control_type = ControlType::AI;
                                     
                                     app.temp_players.push(ai_player);
@@ -1029,7 +1680,7 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
 
                                 if done {
                                     // Lancement du jeu
-                                    let new_game = Game::new(app.temp_players.clone());
+                                    let new_game = Game::new(app.temp_players.clone(), app.difficulty);
                                     
                                     // Si on est en réseau (Host), on envoie l'état initial
                                     if let Some(client) = &app.network_client {
@@ -1041,9 +1692,15 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
 
                                     app.game = Some(new_game);
                                     app.current_state = AppState::Playing;
+                                    app.update_available_actions(); // Initialisation des actions
                                     app.input.clear();
                                     app.cursor_position = 0;
                                     app.start_time = Some(Instant::now());
+                                    
+                                    // En local, le joueur est toujours l'ID 0
+                                    if app.my_player_id.is_none() {
+                                        app.my_player_id = Some(0);
+                                    }
                                 } else {
                                     // Au tour du joueur suivant
                                     app.current_state = AppState::SetupEnterPlayerName;
@@ -1052,6 +1709,7 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                 }
                             }
                         }
+                    }
                         KeyCode::Esc => {
                             // Retour à la saisie du nom (on annule le joueur en cours)
                             app.temp_players.pop();
@@ -1101,7 +1759,9 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                     match crate::network::client::Client::connect("127.0.0.1:8080".to_string()).await {
                                         Ok(client) => {
                                             app.network_client = Some(client);
-                                            app.current_state = AppState::Setup; // On va au setup
+                                            app.current_state = AppState::MultiplayerNameInput; // On demande le nom
+                                            app.input.clear();
+                                            app.cursor_position = 0;
                                         }
                                         Err(e) => {
                                             app.error_message = Some(format!("Erreur connexion: {}", e));
@@ -1174,7 +1834,9 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                                     app.is_host = false;
                                     // TODO: Attendre que l'hôte lance la partie ou configure
                                     // Pour l'instant on va au setup mais en mode "Client" (restreint)
-                                    app.current_state = AppState::Lobby; 
+                                    app.current_state = AppState::MultiplayerNameInput; 
+                                    app.input.clear();
+                                    app.cursor_position = 0; 
                                 }
                                 Err(e) => {
                                     app.input_error = Some(format!("Erreur: {}", e));
@@ -1189,6 +1851,44 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                 }
             }
         }
+        AppState::MultiplayerNameInput => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            app.input.insert(app.cursor_position, c);
+                            app.cursor_position += 1;
+                        }
+                        KeyCode::Backspace => {
+                            if app.cursor_position > 0 {
+                                app.input.remove(app.cursor_position - 1);
+                                app.cursor_position -= 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if !app.input.trim().is_empty() {
+                                app.my_name = app.input.trim().to_string();
+                                
+                                // Envoyer le message Join
+                                if let Some(client) = &app.network_client {
+                                    let msg = crate::network::protocol::NetworkMessage::Join { name: app.my_name.clone() };
+                                    client.send(msg).await;
+                                }
+
+                                if app.is_host {
+                                    app.current_state = AppState::Setup;
+                                } else {
+                                    app.current_state = AppState::Lobby;
+                                }
+                                app.input.clear();
+                                app.cursor_position = 0;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         AppState::Lobby => {
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
@@ -1197,6 +1897,102 @@ pub async fn handle_events(app: &mut App) -> io::Result<()> {
                             // Quitter le lobby
                             app.network_client = None;
                             app.current_state = AppState::MultiplayerMenu;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        AppState::RespondToInquiry => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Left | KeyCode::Right => {
+                            // Bascule entre 0 (Oui) et 1 (Non)
+                            app.pause_menu_index = 1 - app.pause_menu_index;
+                        }
+                        KeyCode::Enter => {
+                            // Validation de la réponse
+                            if let Some((attacker_id, letter)) = app.pending_inquiry {
+                                let claimed_has_letter = app.pause_menu_index == 0; // 0 = OUI
+                                
+                                if claimed_has_letter {
+                                    // Si on dit OUI, on doit préciser la position
+                                    app.current_state = AppState::InputPosition;
+                                    app.input.clear();
+                                    app.cursor_position = 0;
+                                } else {
+                                    // Si on dit NON, on résout tout de suite
+                                    if let Some(game) = &mut app.game {
+                                        let event = game.resolve_inquiry(attacker_id, app.my_player_id.unwrap_or(0), letter, false, vec![]);
+                                        
+                                        app.last_action_success = event.event_type == GameEventType::LetterFound;
+                                        let msg = event.get_message_for(app.my_player_id.unwrap_or(0));
+                                        app.last_action_result = msg.clone();
+                                        app.game_log.push(format!("> {}", msg));
+                                        
+                                        app.pending_inquiry = None;
+                                        app.current_state = AppState::Playing;
+                                        game.next_turn();
+                                        app.update_available_actions();
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        AppState::InputPosition => {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Char(c) if c.is_digit(10) || c == ' ' || c == ',' => {
+                            app.input.push(c);
+                            app.cursor_position += 1;
+                        }
+                        KeyCode::Backspace => {
+                            if !app.input.is_empty() {
+                                app.input.pop();
+                                app.cursor_position -= 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            // Parsing des positions multiples (ex: "1, 3")
+                            let parts: Vec<&str> = app.input.split([',', ' '])
+                                .filter(|s| !s.trim().is_empty())
+                                .collect();
+                            
+                            let mut positions = Vec::new();
+                            let mut valid = true;
+                            
+                            for part in parts {
+                                if let Ok(pos) = part.trim().parse::<usize>() {
+                                    positions.push(pos);
+                                } else {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+
+                            if valid && !positions.is_empty() {
+                                if let Some((attacker_id, letter)) = app.pending_inquiry {
+                                    if let Some(game) = &mut app.game {
+                                        let event = game.resolve_inquiry(attacker_id, app.my_player_id.unwrap_or(0), letter, true, positions);
+                                        
+                                        app.last_action_success = event.event_type == GameEventType::LetterFound;
+                                        let msg = event.get_message_for(app.my_player_id.unwrap_or(0));
+                                        app.last_action_result = msg.clone();
+                                        app.game_log.push(format!("> {}", msg));
+                                        
+                                        app.pending_inquiry = None;
+                                        app.current_state = AppState::Playing;
+                                        game.next_turn();
+                                        app.update_available_actions();
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1218,9 +2014,28 @@ pub async fn handle_network_events(app: &mut App) -> io::Result<()> {
 
     while let Some(msg) = client.try_recv() {
         match msg {
-            crate::network::protocol::NetworkMessage::Welcome { player_id, players: _ } => {
-                app.my_player_id = Some(player_id);
-                app.game_log.push(format!("[Réseau] Connecté avec l'ID {}", player_id));
+            crate::network::protocol::NetworkMessage::Join { name } => {
+                if app.is_host {
+                    let new_id = app.connected_players.len() as u32;
+                    app.connected_players.push((new_id, name.clone()));
+                    
+                    let msg = crate::network::protocol::NetworkMessage::Welcome { 
+                        new_player_id: new_id, 
+                        new_player_name: name.clone(),
+                        all_players: app.connected_players.clone() 
+                    };
+                    client.send(msg).await;
+                    app.game_log.push(format!("[Hôte] {} a rejoint (ID: {})", name, new_id));
+                }
+            }
+            crate::network::protocol::NetworkMessage::Welcome { new_player_id, new_player_name, all_players } => {
+                app.connected_players = all_players;
+                app.game_log.push(format!("[Réseau] {} a rejoint la partie !", new_player_name));
+                
+                if new_player_name == app.my_name {
+                    app.my_player_id = Some(new_player_id);
+                    app.game_log.push(format!("Vous êtes connecté avec l'ID {}", new_player_id));
+                }
             }
             crate::network::protocol::NetworkMessage::GameInit(game) => {
                 app.game = Some(game);
@@ -1243,29 +2058,65 @@ pub async fn handle_network_events(app: &mut App) -> io::Result<()> {
                 let mut winner_found = None;
                 
                 if let Some(game) = &mut app.game {
+                    // Gestion du Log Groupé (Réseau)
+                    if game.get_current_round() > app.last_log_turn {
+                        app.game_log.push(format!("> [Tour {}]", game.get_current_round()));
+                        app.last_log_turn = game.get_current_round();
+                    }
+
                     match action_type {
                         crate::network::protocol::NetworkActionType::ProposeLetter => {
                             if let Some(tid) = target_id {
                                 let letter = payload.chars().next().unwrap_or(' ');
-                                let result = game.process_letter_proposal(player_id, tid, letter);
-                                app.game_log.push(format!("[Réseau] {}", result));
+                                // Pour le réseau, on résout immédiatement (pas d'interaction pour l'instant)
+                                // On considère que le réseau a validé (ou on fait confiance)
+                                // TODO: Supporter la position dans le protocole réseau
+                                let event = game.resolve_inquiry(player_id, tid, letter, true, vec![]);
+                                
+                                // Filtrage du message selon qui je suis
+                                let msg = if let Some(my_id) = app.my_player_id {
+                                    event.get_message_for(my_id)
+                                } else {
+                                    event.public_log.clone()
+                                };
+                                
+                                app.game_log.push(format!("[Réseau] {}", msg));
                             }
                         }
                         crate::network::protocol::NetworkActionType::GuessWord => {
                             if let Some(tid) = target_id {
-                                let result = game.process_word_guess(player_id, tid, payload, crate::game::GuessType::Normal);
-                                app.game_log.push(format!("[Réseau] {}", result));
+                                let event = game.process_word_guess(player_id, tid, payload, crate::game::GuessType::Normal);
+                                
+                                // Filtrage du message selon qui je suis
+                                let msg = if let Some(my_id) = app.my_player_id {
+                                    event.get_message_for(my_id)
+                                } else {
+                                    event.public_log.clone()
+                                };
+
+                                app.game_log.push(format!("[Réseau] {}", msg));
                             }
                         }
                         crate::network::protocol::NetworkActionType::Buzz => {
                             if let Some(tid) = target_id {
-                                let result = game.process_word_guess(player_id, tid, payload, crate::game::GuessType::Buzz);
-                                app.game_log.push(format!("[Réseau] {}", result));
+                                let event = game.process_word_guess(player_id, tid, payload, crate::game::GuessType::Buzz);
+                                
+                                // Filtrage du message selon qui je suis
+                                let msg = if let Some(my_id) = app.my_player_id {
+                                    event.get_message_for(my_id)
+                                } else {
+                                    event.public_log.clone()
+                                };
+
+                                app.game_log.push(format!("[Réseau] {}", msg));
                             }
                         }
                         crate::network::protocol::NetworkActionType::PassTurn => {
                             game.next_turn();
                             app.game_log.push(format!("[Réseau] Un joueur a passé son tour."));
+                        }
+                        crate::network::protocol::NetworkActionType::UsePower => {
+                             app.game_log.push(format!("[Réseau] Pouvoir utilisé."));
                         }
                     }
                     

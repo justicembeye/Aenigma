@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkMessage {
     Join { name: String },
-    Welcome { player_id: u32, players: Vec<String> }, // ID assigné, liste des noms
+    Welcome { 
+        new_player_id: u32, 
+        new_player_name: String,
+        all_players: Vec<(u32, String)> 
+    },
     GameInit(crate::game::Game),
     GameStart,
     Action { 
@@ -28,4 +32,5 @@ pub enum NetworkActionType {
     GuessWord,
     Buzz,
     PassTurn,
+    UsePower,
 }
